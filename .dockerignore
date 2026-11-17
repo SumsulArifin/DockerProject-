@@ -1,0 +1,12 @@
+**/node_modules
+**/coverage
+**/.git
+**/.github
+**/*.md
+app/test
+k8s
+terraform
+monitoring
+docker-compose*.yml
+*.log
+health_log.txt

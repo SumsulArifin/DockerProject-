@@ -1,0 +1,10 @@
+node_modules/
+coverage/
+health_log.txt*
+.env
+.env.monitoring
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
