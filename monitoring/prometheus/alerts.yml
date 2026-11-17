@@ -1,0 +1,55 @@
+groups:
+  - name: devops-task-alerts
+    rules:
+      # Fires fast: a dead instance behind a health check should page almost
+      # immediately, but 1m avoids flapping on a single missed scrape.
+      - alert: AppInstanceDown
+        expr: up{job="app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "App instance down ({{ $labels.instance }})"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} for 1 minute."
+
+      # 5xx rate above 5% sustained for 5m is a real incident, not a blip;
+      # 5m also smooths out noisy low-traffic periods.
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_errors_total[5m])) / sum(rate(http_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP error rate"
+          description: "More than 5% of requests have returned 5xx over the last 5 minutes."
+
+      # 80% is the conventional "act before you're paged again at 3am"
+      # threshold for disk; 10m avoids alerting on a transient log burst.
+      - alert: HostDiskUsageHigh
+        expr: |
+          (
+            1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})
+          ) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage above 80% on {{ $labels.instance }} ({{ $labels.mountpoint }})"
+          description: "Filesystem {{ $labels.mountpoint }} is at {{ $value | printf \"%.1f\" }}% used."
+
+      # Containers get OOM-killed abruptly with no warning once they hit the
+      # limit, so alert at 90% with a short 5m window to give time to react.
+      - alert: ContainerMemoryNearLimit
+        expr: |
+          (
+            container_memory_working_set_bytes{name!=""} / container_spec_memory_limit_bytes{name!="", container_spec_memory_limit_bytes > 0}
+          ) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} near its memory limit"
+          description: "{{ $labels.name }} is using {{ $value | printf \"%.1f\" }}x its configured memory limit."

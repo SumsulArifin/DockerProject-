@@ -1,0 +1,51 @@
+// Discover all running containers via the Docker socket.
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Strip the leading slash Docker puts on container names and expose it as
+// the "container" label — bounded by the number of running containers.
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "default" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.process.app_logs.receiver]
+}
+
+loki.process "app_logs" {
+  forward_to = [loki.write.default.receiver]
+
+  // The app logs structured JSON (pino). Parse it so fields are queryable,
+  // but only promote "level" to a Loki label: it's a closed, tiny set of
+  // values (10/20/30/40/50/60). We deliberately do NOT label by request
+  // path or method — those are effectively unbounded and would blow up
+  // Loki's label index (one stream per distinct value). They stay in the
+  // parsed JSON body instead, filterable with `| json | path="/health"`
+  // in Grafana without being part of the index.
+  stage.json {
+    expressions = {
+      level = "level",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level = "level",
+    }
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
