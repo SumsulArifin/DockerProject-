@@ -78,28 +78,34 @@ flowchart LR
 
 > **Note on verification in this environment**: this repository was built in
 > a sandbox without a running Docker daemon, Terraform binary, or local
-> Kubernetes cluster. The Node test suite (`npm test`) was run and passes
-> (4/4, see `app/coverage`), and the merged `docker compose config` was
-> validated. The Dockerfile, Compose files, Terraform, Kubernetes manifests,
-> and monitoring config were not built/applied/deployed from here — follow
-> the steps below on a machine with Docker/Terraform/kubectl to do that and
-> capture the screenshots/logs the task asks for (image size, `terraform
-> apply` output, dashboard screenshots, rollout/rollback output).
+> Kubernetes cluster at the time this was first written. That has since been
+> updated: the app was built and run with `docker compose up` on a real
+> Docker host and the endpoints below were smoke-tested live (see the
+> [image size](#running-locally) and endpoint responses). Terraform apply
+> and the Kubernetes rollout/rollback still need to be run and screenshotted
+> on a machine with Terraform/kubectl — follow the steps below to do that.
 
 ## Running locally
 
 ```bash
 docker compose up --build
+# port 8080 already taken on your machine (e.g. by another project)?
+# APP_HOST_PORT=8090 docker compose up --build
 ```
 
-- App: http://localhost:8080/
+- App: http://localhost:8080/ (or your `APP_HOST_PORT`)
 - Health: http://localhost:8080/health
 - Metrics: http://localhost:8080/metrics
 
-After building, record the final image size with:
+Verified live (`docker compose up --build`, then curled each endpoint):
 
-```bash
-docker images devops-task-app:local --format "{{.Repository}}: {{.Size}}"
+```
+$ curl -s localhost:8080/
+{"message":"Hello from DevOps Task!","status":"running","version":"1.0.0"}
+$ curl -s localhost:8080/health
+{"status":"ok","environment":"local","version":"1.0.0"}
+$ docker images devops-task-app:local --format "{{.Repository}}: {{.Size}}"
+devops-task-app: 204MB
 ```
 
 ## Running the observability stack
@@ -335,10 +341,9 @@ cause using these tools?"*
 
 ## What I would improve with more time
 
-- Build and push the image from this environment end-to-end (a Docker
-  daemon wasn't available here) and paste the real `docker images` size,
-  `terraform apply`, and `kubectl rollout`/dashboard screenshots the task
-  asks for, instead of documenting the expected commands.
+- Run `terraform apply` and a real `kubectl rollout`/dashboard screenshot
+  pass and paste that output here (the app build/run and endpoint smoke
+  test are now done and verified above; Terraform/Kubernetes still aren't).
 - Add Alertmanager with Slack/Discord routing instead of only defining
   Prometheus alerting rules.
 - Add a GitHub Actions job that runs `terraform plan` on PRs touching
