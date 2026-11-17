@@ -1,4 +1,5 @@
 # DevOps Engineer Assessment — Hello from DevOps Task
+H
 
 A small Node.js/Express web service taken from source to a containerized,
 CI/CD-deployed, Kubernetes-orchestrated, fully observed production-style
