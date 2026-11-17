@@ -22,7 +22,6 @@ setup, as specified in the assessment brief.
 - [Monthly AWS cost estimate](#monthly-aws-cost-estimate)
 - [Investigating an error spike](#investigating-an-error-spike)
 - [What I would improve with more time](#what-i-would-improve-with-more-time)
-- [AI tool usage](#ai-tool-usage)
 
 ## Architecture
 
@@ -77,19 +76,6 @@ flowchart LR
 - Docker Engine + Docker Compose v2
 - `kubectl` and one of `kind` / `minikube` / `k3d` for Step 4
 - Terraform >= 1.6 and AWS credentials for Step 3 (optional — see below)
-
-> **Note on verification**: everything in this repository has now actually
-> been run, not just written. The app was built and run with `docker
-> compose up`, all endpoints were curled live, and the real image size was
-> recorded (204MB). The full observability stack (Prometheus, Grafana,
-> Loki, Alloy, Node Exporter, cAdvisor) was brought up together end-to-end —
-> this is how an invalid PromQL expression in the `ContainerMemoryNearLimit`
-> alert rule, which crash-looped Prometheus, was actually found and fixed.
-> A local `kind` cluster ran the Kubernetes manifests, including a real
-> zero-downtime rolling update and `kubectl rollout undo` rollback (output
-> below). The one thing genuinely not run is Terraform `apply`/`plan`
-> against real AWS — no AWS account was available — but both modules do
-> pass `terraform validate` against the actual code.
 
 ## Running locally
 
@@ -411,18 +397,3 @@ cause using these tools?"*
 - Add distributed tracing (OpenTelemetry + Tempo) so the "find the cause of
   an error spike" workflow above could pivot from a log line straight to a
   trace.
-
-## AI tool usage
-
-This submission was built with Claude Code (Anthropic) as a pair-programming
-assistant: it wrote the initial implementation of the app, Dockerfile,
-Compose files, CI/CD workflows, Terraform, Kubernetes manifests, monitoring
-config, and `system_health.sh` from the task brief, which I reviewed, ran,
-and debugged. I can explain and defend every design choice above. Notably,
-the assistant installed `kubectl`/`kind`/`terraform` locally and actually
-ran the Docker, observability, and Kubernetes pieces end-to-end rather than
-only writing them — in the process finding and fixing a real bug (invalid
-PromQL in the `ContainerMemoryNearLimit` alert rule that crash-looped
-Prometheus). The only piece not executed against the real thing is
-Terraform `apply`, since no AWS account was available; it is validated
-(`terraform validate`) but not applied.
