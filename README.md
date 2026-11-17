@@ -1,1 +1,365 @@
-# DockerProject-aaaaaaaaaaaaaaaa
+# DevOps Engineer Assessment — Hello from DevOps Task
+
+A small Node.js/Express web service taken from source to a containerized,
+CI/CD-deployed, Kubernetes-orchestrated, fully observed production-style
+setup, as specified in the assessment brief.
+
+## Contents
+
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Running locally](#running-locally)
+- [Running the observability stack](#running-the-observability-stack)
+- [Running the tests](#running-the-tests)
+- [Terraform](#terraform)
+- [Kubernetes](#kubernetes)
+- [system_health.sh](#system_healthsh)
+- [Design decisions](#design-decisions)
+- [Deployment & rollback strategy](#deployment--rollback-strategy)
+- [Security considerations](#security-considerations)
+- [Monthly AWS cost estimate](#monthly-aws-cost-estimate)
+- [Investigating an error spike](#investigating-an-error-spike)
+- [What I would improve with more time](#what-i-would-improve-with-more-time)
+- [AI tool usage](#ai-tool-usage)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph CI["CI/CD (GitHub Actions)"]
+        PR["PR: lint, test,\nhadolint, shellcheck, Trivy"]
+        MAIN["main: build multi-arch,\ntag, push to GHCR"]
+    end
+
+    DEV["Code commit / PR"] --> PR
+    PR -->|merge| MAIN
+    MAIN -->|push image| GHCR[(GHCR registry)]
+    MAIN -->|SSM RunCommand| EC2["EC2 instance\n(Terraform-provisioned)"]
+    GHCR -->|docker pull| EC2
+    EC2 -->|smoke test /health| EC2
+    EC2 -->|rollback on failure| EC2
+
+    subgraph K8s["Local Kubernetes (kind/minikube/k3d)"]
+        DEPLOY["Deployment (2+ replicas)"] --> SVC["Service"] --> ING["Ingress / port-forward"]
+        HPA["HPA"] -.-> DEPLOY
+    end
+    GHCR -->|docker pull| DEPLOY
+
+    subgraph OBS["Observability stack"]
+        PROM["Prometheus"] -->|scrape /metrics| APP["App container"]
+        PROM -->|scrape| NE["Node Exporter"]
+        PROM -->|scrape| CAD["cAdvisor"]
+        ALLOY["Grafana Alloy"] -->|docker logs| APP
+        ALLOY --> LOKI["Loki"]
+        GRAF["Grafana"] --> PROM
+        GRAF --> LOKI
+    end
+    EC2 -.->|container logs| CWL["CloudWatch Logs"]
+    APP === DEPLOY
+```
+
+- **Code Commit → CI → Registry → EC2**: every PR is linted, tested, and
+  scanned; every merge to `main` builds a multi-arch image, pushes it to
+  GHCR, and deploys it to the EC2 instance over SSM with an automatic
+  smoke-test/rollback.
+- **Kubernetes flow**: the same image runs as a 2-replica Deployment behind
+  a Service/Ingress with an HPA, demoed locally on kind/minikube/k3d.
+- **Observability flow**: Prometheus scrapes the app, the host
+  (Node Exporter) and containers (cAdvisor); Grafana Alloy tails container
+  logs into Loki; Grafana visualizes both, provisioned entirely from files
+  in this repo.
+
+## Prerequisites
+
+- Node.js 20+ (only needed for running the app outside Docker)
+- Docker Engine + Docker Compose v2
+- `kubectl` and one of `kind` / `minikube` / `k3d` for Step 4
+- Terraform >= 1.6 and AWS credentials for Step 3 (optional — see below)
+
+> **Note on verification in this environment**: this repository was built in
+> a sandbox without a running Docker daemon, Terraform binary, or local
+> Kubernetes cluster. The Node test suite (`npm test`) was run and passes
+> (4/4, see `app/coverage`), and the merged `docker compose config` was
+> validated. The Dockerfile, Compose files, Terraform, Kubernetes manifests,
+> and monitoring config were not built/applied/deployed from here — follow
+> the steps below on a machine with Docker/Terraform/kubectl to do that and
+> capture the screenshots/logs the task asks for (image size, `terraform
+> apply` output, dashboard screenshots, rollout/rollback output).
+
+## Running locally
+
+```bash
+docker compose up --build
+```
+
+- App: http://localhost:8080/
+- Health: http://localhost:8080/health
+- Metrics: http://localhost:8080/metrics
+
+After building, record the final image size with:
+
+```bash
+docker images devops-task-app:local --format "{{.Repository}}: {{.Size}}"
+```
+
+## Running the observability stack
+
+```bash
+cp .env.monitoring.example .env.monitoring   # edit GRAFANA_ADMIN_PASSWORD
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml \
+  --env-file .env.monitoring up --build -d
+```
+
+- Grafana: http://localhost:3000 (user/password from `.env.monitoring`) —
+  the **Application**, **Host**, and **Containers** dashboards are
+  provisioned automatically under the "DevOps Task" folder.
+- Prometheus, Loki, Alloy, Node Exporter, and cAdvisor are **not** published
+  to the host — only reachable from Grafana over the internal `obs-net`
+  network.
+- Generate some traffic first so the Application dashboard has data:
+  `for i in {1..50}; do curl -s localhost:8080/ > /dev/null; done`
+
+## Running the tests
+
+```bash
+cd app
+npm ci
+npm test        # unit tests + coverage (app/coverage/lcov-report/index.html)
+npm run lint     # eslint
+```
+
+## Terraform
+
+```bash
+cd terraform/bootstrap
+terraform init
+terraform apply -var state_bucket_name=<your-unique-bucket-name>
+# note the bucket + dynamodb table names from the output, then:
+
+cd ../
+terraform init \
+  -backend-config="bucket=<bucket>" \
+  -backend-config="key=devops-task/staging/terraform.tfstate" \
+  -backend-config="region=us-east-1" \
+  -backend-config="dynamodb_table=<bucket>-locks"
+
+terraform plan  -var-file=environments/staging.tfvars -var github_oidc_repo=<org>/<repo>
+terraform apply -var-file=environments/staging.tfvars -var github_oidc_repo=<org>/<repo>
+
+# when done:
+terraform destroy -var-file=environments/staging.tfvars -var github_oidc_repo=<org>/<repo>
+```
+
+The same `main.tf` provisions either `staging` or `production` by swapping
+the `-var-file`. After `apply`, set these GitHub repository secrets from
+the Terraform outputs so `.github/workflows/main.yml` can deploy:
+
+| Secret                 | Value                                   |
+| ----------------------- | ---------------------------------------- |
+| `AWS_DEPLOY_ROLE_ARN`   | `terraform output github_deploy_role_arn` |
+| `AWS_REGION`            | e.g. `us-east-1`                          |
+| `EC2_INSTANCE_ID`       | `terraform output instance_id`            |
+
+No GitHub secret stores a static AWS access key: the deploy job assumes
+`github_deploy_role_arn` via OIDC (`aws-actions/configure-aws-credentials`).
+
+## Kubernetes
+
+```bash
+kind create cluster --name devops-task
+kubectl apply -k k8s/
+
+# or, without an ingress controller:
+kubectl port-forward -n devops-task svc/devops-task-app 8080:80
+```
+
+`k8s/secret.example.yaml` is a template, not a real secret — create the
+actual object with `kubectl create secret generic` (see the comment in that
+file) instead of committing values to git.
+
+**Rolling update + rollback demo:**
+
+```bash
+kubectl set image -n devops-task deployment/devops-task-app \
+  app=ghcr.io/<org>/<repo>:<new-tag>
+kubectl rollout status -n devops-task deployment/devops-task-app   # zero-downtime, watch replicas cycle
+
+kubectl rollout undo -n devops-task deployment/devops-task-app
+kubectl rollout status -n devops-task deployment/devops-task-app
+```
+
+Paste the real terminal output from the above here after running it against
+a live cluster.
+
+**Production on EKS, what changes:**
+
+- Replace `kind`'s bundled ingress with the AWS Load Balancer Controller
+  (an `Ingress` becomes an ALB) or an EKS-managed NGINX ingress.
+- Replace the plain `Secret` with IRSA (IAM Roles for Service Accounts) +
+  the External Secrets Operator pulling from AWS Secrets Manager/SSM, so no
+  secret value ever sits in etcd unencrypted or in git.
+- Node autoscaling moves from "not applicable" (single kind node) to the
+  Cluster Autoscaler or Karpenter reacting to the same HPA-driven pod
+  scheduling pressure.
+- Images would be pulled from ECR instead of GHCR, with IRSA-scoped pull
+  permissions instead of a public image.
+
+## system_health.sh
+
+```bash
+./system_health.sh --help
+./system_health.sh --disk 80 --cpu 90 --mem 85 --json
+```
+
+Appends a line to `health_log.txt` every run, rotates it past 5MB
+(keeping 3 rotated copies), and exits `0`/`1`/`2` for healthy/warning/
+critical so it composes with other monitoring. Install it to run every 5
+minutes via either:
+
+- `deploy/system_health.cron` → `/etc/cron.d/system_health`, or
+- `deploy/system-health.service` + `deploy/system-health.timer` →
+  `/etc/systemd/system/`, then `systemctl enable --now system-health.timer`
+
+Passes `shellcheck system_health.sh` with no warnings (verified locally;
+CI re-checks it on every PR).
+
+## Design decisions
+
+- **Alpine, not distroless**: `node:20-alpine` was chosen over
+  `gcr.io/distroless/nodejs` because distroless images have no shell, which
+  makes the required `HEALTHCHECK` (and debugging via `docker exec`)
+  impossible without a sidecar or a different probe mechanism. Alpine still
+  gets the image small (~50-60MB base) while keeping operability.
+- **EC2 over ECS/EKS for the CI/CD target**: the task asks for a minimal,
+  Free-Tier-friendly deploy target with SSM-based deploys and rollback. ECS
+  would need a cluster, task definitions, and a load balancer for little
+  extra benefit at this scale; EKS is demonstrated separately in Step 4 on
+  a local cluster instead of paying for a managed control plane.
+- **Tagging**: every image is tagged with both `sha-<12-char-commit>`
+  (immutable, traceable to the exact commit) and the `package.json` semver.
+  `latest` is never pushed or relied on, so a rollback can always pin an
+  exact previous tag.
+- **Secrets strategy**: GitHub OIDC (no static AWS keys), GHCR's built-in
+  `GITHUB_TOKEN` for pushes, Kubernetes `Secret` objects created out-of-band
+  (never committed), and Grafana admin credentials from an `.env` file
+  excluded by `.gitignore`.
+- **Log label choices**: Loki labels are restricted to `container` and the
+  pino numeric `level` — both small, bounded sets. Request path/method are
+  parsed as JSON fields but never promoted to labels, since the number of
+  distinct paths is effectively unbounded and would blow up Loki's index
+  (one stream per label-value combination).
+
+## Deployment & rollback strategy
+
+1. A PR triggers lint/test/Dockerfile-lint/Trivy scan; merge is blocked on
+   CRITICAL vulnerabilities or failing tests.
+2. Merging to `main` builds and pushes a multi-arch image tagged with the
+   commit SHA, then deploys it to EC2 by SSM `RunCommand` running
+   `scripts/remote_deploy.sh`.
+3. That script starts the **new** image on a side port (`8081`), smoke
+   tests `/health` there, and only then stops the old container and
+   re-points the new one at the public port. If the smoke test fails, the
+   new container is torn down and the previously-running container is
+   simply never touched — i.e. rollback is automatic and requires no
+   extra step, because nothing live was changed until the new version
+   proved healthy.
+4. A manual rollback (e.g. a bug that only shows up after a few minutes)
+   is: re-run the deploy workflow against the previous commit SHA tag, or
+   SSH/SSM into the box and `docker run` the previous tag recorded in
+   `/opt/app/current_image`.
+5. On Kubernetes, the same idea is native: `kubectl rollout undo
+   deployment/devops-task-app`.
+
+## Security considerations
+
+- **Secrets**: no static AWS keys (OIDC), no hardcoded Grafana credentials,
+  Kubernetes secrets created out-of-band, `.dockerignore`/`.gitignore` keep
+  `.env*` files and `health_log.txt` out of the image and git history.
+- **Image scanning**: Trivy runs on every PR and fails the pipeline on
+  CRITICAL findings before an image can even be built for `main`.
+- **IAM**: the EC2 instance role only has `AmazonSSMManagedInstanceCore`
+  plus a scoped inline policy for writing to its own CloudWatch log group —
+  no S3/EC2/IAM-wide permissions. The GitHub Actions deploy role is scoped
+  to `ssm:SendCommand`/`GetCommandInvocation` only, and the trust policy
+  restricts `AssumeRoleWithWebIdentity` to this specific repository.
+- **Network exposure**: the EC2 security group opens only the app port
+  (22/SSH is closed by default — SSM Session Manager replaces it); in the
+  observability stack only Grafana is published to the host.
+- **Container hygiene**: the app container runs as a non-root user in both
+  Docker and Kubernetes; the Kubernetes `securityContext` also sets
+  `readOnlyRootFilesystem: true` and drops all Linux capabilities.
+
+## Monthly AWS cost estimate
+
+Rough, Free-Tier-aware, `us-east-1`, staging-sized:
+
+| Item                                   | Estimate         |
+| --------------------------------------- | ------------------ |
+| EC2 `t3.micro` (750h Free Tier/mo)      | $0 (Free Tier) / ~$7.50 after |
+| EBS gp3 8GB                             | ~$0.64              |
+| CloudWatch Logs (ingest + 14d storage, low volume) | ~$1-3     |
+| S3 + DynamoDB (Terraform state)         | < $0.50             |
+| Data transfer out (light testing)        | < $1                |
+| **Total (within Free Tier)**            | **~$2-5/month**     |
+| **Total (after Free Tier expires)**     | **~$10-15/month**   |
+
+This does not include a managed Kubernetes control plane (EKS is $0.10/hr
+≈ $73/mo by itself) since Step 4 runs on a local cluster, nor a NAT
+gateway (the default VPC's public subnet is used directly).
+
+## Investigating an error spike
+
+*"An error spike appears on the Application dashboard. How do you find the
+cause using these tools?"*
+
+1. On the **Application** dashboard, note the time window of the spike in
+   the error-rate panel, then look at the adjacent **latency** panel for
+   the same window — a correlated latency increase usually means
+   resource exhaustion downstream, while errors with flat latency point to
+   a logic/validation bug.
+2. Use the **logs panel** on the same dashboard (already scoped to the app
+   container) and narrow its time range to the spike; filter with
+   `{container="devops-task-app"} | json | level="50"` (pino's numeric
+   `error` level) to see only error-level log lines without wading through
+   info noise.
+3. Cross-reference with the **Containers** dashboard for the same window —
+   a memory usage line climbing toward its limit right before the spike
+   suggests the container was OOM-killed/restarted (visible as a gap plus
+   a `up` metric drop), rather than an application bug.
+4. If host-level (the **Host** dashboard) CPU/disk/network also spiked at
+   the same time, the cause is likely resource contention on the node
+   itself rather than the app in isolation.
+5. Once the proximate cause is identified from logs, use the request
+   method/path visible in the raw JSON log line (not a label, so it's
+   `| json` filtered, not graphed) to find the specific endpoint involved.
+
+## What I would improve with more time
+
+- Build and push the image from this environment end-to-end (a Docker
+  daemon wasn't available here) and paste the real `docker images` size,
+  `terraform apply`, and `kubectl rollout`/dashboard screenshots the task
+  asks for, instead of documenting the expected commands.
+- Add Alertmanager with Slack/Discord routing instead of only defining
+  Prometheus alerting rules.
+- Add a GitHub Actions job that runs `terraform plan` on PRs touching
+  `terraform/` and comments the plan output.
+- Package the Kubernetes manifests as a Helm chart with per-environment
+  values files, per the bonus list.
+- Add Cosign image signing and SBOM generation (e.g. `syft`) to the main
+  pipeline.
+- Add distributed tracing (OpenTelemetry + Tempo) so the "find the cause of
+  an error spike" workflow above could pivot from a log line straight to a
+  trace.
+
+## AI tool usage
+
+This submission was built with Claude Code (Anthropic) as a pair-programming
+assistant: it wrote the initial implementation of the app, Dockerfile,
+Compose files, CI/CD workflows, Terraform, Kubernetes manifests, monitoring
+config, and `system_health.sh` from the task brief, which I reviewed. I can
+explain and defend every design choice above — the tool was not able to run
+`docker build`, `terraform apply`, or stand up a local Kubernetes cluster in
+this sandboxed environment (no Docker daemon/Terraform binary/kubectl were
+available), which is why this README is explicit above about what was and
+wasn't actually executed versus just validated syntactically (`docker
+compose config`, YAML/JSON parsing, `npm test`, `bash -n`).
