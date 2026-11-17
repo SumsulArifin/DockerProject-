@@ -1,0 +1,3 @@
+# Install with: sudo cp deploy/system_health.cron /etc/cron.d/system_health
+# Runs every 5 minutes as root; adjust the path and user as needed.
+*/5 * * * * root /opt/devops-task/system_health.sh --json >> /var/log/system_health.cron.log 2>&1

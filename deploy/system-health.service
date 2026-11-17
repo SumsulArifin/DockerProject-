@@ -1,0 +1,6 @@
+[Unit]
+Description=Run system_health.sh once
+
+[Service]
+Type=oneshot
+ExecStart=/opt/devops-task/system_health.sh --json
