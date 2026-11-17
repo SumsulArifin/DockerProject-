@@ -1,0 +1,27 @@
+# Requires an ingress controller in the cluster, e.g.:
+#   kind/minikube/k3d: enable the ingress-nginx addon, or
+#   helm install ingress-nginx ingress-nginx/ingress-nginx
+#
+# If you don't want to install a controller, skip this manifest and use the
+# port-forward alternative documented in the README instead:
+#   kubectl port-forward -n devops-task svc/devops-task-app 8080:80
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devops-task-app
+  namespace: devops-task
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: devops-task.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: devops-task-app
+                port:
+                  name: http

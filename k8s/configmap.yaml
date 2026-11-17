@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devops-task-app-config
+  namespace: devops-task
+data:
+  PORT: "8080"
+  LOG_LEVEL: "info"
+  APP_ENV: "kubernetes"
