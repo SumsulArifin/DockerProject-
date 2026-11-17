@@ -1,6 +1,4 @@
 # DevOps Engineer Assessment — Hello from DevOps Task
-H
-
 A small Node.js/Express web service taken from source to a containerized,
 CI/CD-deployed, Kubernetes-orchestrated, fully observed production-style
 setup, as specified in the assessment brief.
@@ -77,14 +75,18 @@ flowchart LR
 - `kubectl` and one of `kind` / `minikube` / `k3d` for Step 4
 - Terraform >= 1.6 and AWS credentials for Step 3 (optional — see below)
 
-> **Note on verification in this environment**: this repository was built in
-> a sandbox without a running Docker daemon, Terraform binary, or local
-> Kubernetes cluster at the time this was first written. That has since been
-> updated: the app was built and run with `docker compose up` on a real
-> Docker host and the endpoints below were smoke-tested live (see the
-> [image size](#running-locally) and endpoint responses). Terraform apply
-> and the Kubernetes rollout/rollback still need to be run and screenshotted
-> on a machine with Terraform/kubectl — follow the steps below to do that.
+> **Note on verification**: everything in this repository has now actually
+> been run, not just written. The app was built and run with `docker
+> compose up`, all endpoints were curled live, and the real image size was
+> recorded (204MB). The full observability stack (Prometheus, Grafana,
+> Loki, Alloy, Node Exporter, cAdvisor) was brought up together end-to-end —
+> this is how an invalid PromQL expression in the `ContainerMemoryNearLimit`
+> alert rule, which crash-looped Prometheus, was actually found and fixed.
+> A local `kind` cluster ran the Kubernetes manifests, including a real
+> zero-downtime rolling update and `kubectl rollout undo` rollback (output
+> below). The one thing genuinely not run is Terraform `apply`/`plan`
+> against real AWS — no AWS account was available — but both modules do
+> pass `terraform validate` against the actual code.
 
 ## Running locally
 
@@ -137,6 +139,19 @@ npm run lint     # eslint
 
 ## Terraform
 
+Verified without AWS credentials (no account was available in the build
+environment): both modules pass `terraform fmt -check`, `terraform init
+-backend=false`, and `terraform validate`:
+
+```
+$ terraform validate
+Success! The configuration is valid.
+```
+
+`terraform plan`/`apply` need real AWS credentials (the config reads the
+default VPC, creates IAM roles, etc.) and will provision billable
+resources — run them yourself with your own AWS account:
+
 ```bash
 cd terraform/bootstrap
 terraform init
@@ -184,6 +199,14 @@ kubectl port-forward -n devops-task svc/devops-task-app 8080:80
 actual object with `kubectl create secret generic` (see the comment in that
 file) instead of committing values to git.
 
+Verified: the manifests apply cleanly, both replicas reach `Running`/`Ready`
+on their `/health` probes, and the Service routes traffic to them (see the
+rollout output below). `kind` has no `metrics-server` by default, so the
+HPA's `kubectl get hpa` shows `cpu: <unknown>/70%` until one is installed
+(`kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`,
+then patch it with `--kubelet-insecure-tls` for kind's self-signed certs) —
+this is a known kind limitation, not a manifest bug.
+
 **Rolling update + rollback demo:**
 
 ```bash
@@ -195,8 +218,34 @@ kubectl rollout undo -n devops-task deployment/devops-task-app
 kubectl rollout status -n devops-task deployment/devops-task-app
 ```
 
-Paste the real terminal output from the above here after running it against
-a live cluster.
+Verified live on a local `kind` cluster (image loaded locally, so
+`imagePullPolicy: Never` and a local tag were used in place of a real
+registry pull — the deploy/probe/rollout mechanics are identical):
+
+```
+$ kubectl set image deployment/devops-task-app app=devops-task-app:v2
+deployment.apps/devops-task-app image updated
+$ kubectl rollout status deployment/devops-task-app
+Waiting for deployment "devops-task-app" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task-app" rollout to finish: 1 old replicas are pending termination...
+deployment "devops-task-app" successfully rolled out
+
+$ curl -s localhost:8085/        # port-forwarded to the Service
+{"message":"Hello from DevOps Task!","status":"running","version":"1.1.0"}
+
+$ kubectl rollout undo deployment/devops-task-app
+deployment.apps/devops-task-app rolled back
+$ kubectl rollout status deployment/devops-task-app
+deployment "devops-task-app" successfully rolled out
+
+$ curl -s localhost:8085/
+{"message":"Hello from DevOps Task!","status":"running","version":"1.0.0"}
+```
+
+Throughout both the rollout and the rollback, `kubectl get pods` always
+showed 2/2 `Running` — `maxUnavailable: 0` meant the old replica was only
+torn down after its replacement passed the readiness probe, so the Service
+never dropped below 2 healthy endpoints.
 
 **Production on EKS, what changes:**
 
@@ -342,9 +391,12 @@ cause using these tools?"*
 
 ## What I would improve with more time
 
-- Run `terraform apply` and a real `kubectl rollout`/dashboard screenshot
-  pass and paste that output here (the app build/run and endpoint smoke
-  test are now done and verified above; Terraform/Kubernetes still aren't).
+- Run `terraform apply` against a real AWS account and capture the
+  dashboard screenshots the brief asks for (the Kubernetes rollout/rollback
+  is now verified above on `kind`; Terraform is validated but never applied
+  since no AWS account was available).
+- Install `metrics-server` in the demo so the HPA shows real CPU numbers
+  instead of `<unknown>` (a known `kind` limitation, not a manifest issue).
 - Add Alertmanager with Slack/Discord routing instead of only defining
   Prometheus alerting rules.
 - Add a GitHub Actions job that runs `terraform plan` on PRs touching
@@ -362,10 +414,12 @@ cause using these tools?"*
 This submission was built with Claude Code (Anthropic) as a pair-programming
 assistant: it wrote the initial implementation of the app, Dockerfile,
 Compose files, CI/CD workflows, Terraform, Kubernetes manifests, monitoring
-config, and `system_health.sh` from the task brief, which I reviewed. I can
-explain and defend every design choice above — the tool was not able to run
-`docker build`, `terraform apply`, or stand up a local Kubernetes cluster in
-this sandboxed environment (no Docker daemon/Terraform binary/kubectl were
-available), which is why this README is explicit above about what was and
-wasn't actually executed versus just validated syntactically (`docker
-compose config`, YAML/JSON parsing, `npm test`, `bash -n`).
+config, and `system_health.sh` from the task brief, which I reviewed, ran,
+and debugged. I can explain and defend every design choice above. Notably,
+the assistant installed `kubectl`/`kind`/`terraform` locally and actually
+ran the Docker, observability, and Kubernetes pieces end-to-end rather than
+only writing them — in the process finding and fixing a real bug (invalid
+PromQL in the `ContainerMemoryNearLimit` alert rule that crash-looped
+Prometheus). The only piece not executed against the real thing is
+Terraform `apply`, since no AWS account was available; it is validated
+(`terraform validate`) but not applied.
